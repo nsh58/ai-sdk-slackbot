@@ -1,4 +1,4 @@
-import { openai } from "@ai-sdk/openai";
+import { anthropic } from "@ai-sdk/anthropic";
 import { CoreMessage, generateText, tool } from "ai";
 import { z } from "zod";
 import { exa } from "./utils";
@@ -8,7 +8,7 @@ export const generateResponse = async (
   updateStatus?: (status: string) => void,
 ) => {
   const { text } = await generateText({
-    model: openai("gpt-4o"),
+    model: anthropic("claude-3-5-haiku-20241022"),
     system: `You are a Slack bot assistant Keep your responses concise and to the point.
     - Do not tag users.
     - Current date is: ${new Date().toISOString().split("T")[0]}
@@ -36,34 +36,6 @@ export const generateResponse = async (
             weatherCode: weatherData.current.weathercode,
             humidity: weatherData.current.relativehumidity_2m,
             city,
-          };
-        },
-      }),
-      searchWeb: tool({
-        description: "Use this to search the web for information",
-        parameters: z.object({
-          query: z.string(),
-          specificDomain: z
-            .string()
-            .nullable()
-            .describe(
-              "a domain to search if the user specifies e.g. bbc.com. Should be only the domain name without the protocol",
-            ),
-        }),
-        execute: async ({ query, specificDomain }) => {
-          updateStatus?.(`is searching the web for ${query}...`);
-          const { results } = await exa.searchAndContents(query, {
-            livecrawl: "always",
-            numResults: 3,
-            includeDomains: specificDomain ? [specificDomain] : undefined,
-          });
-
-          return {
-            results: results.map((result) => ({
-              title: result.title,
-              url: result.url,
-              snippet: result.text.slice(0, 1000),
-            })),
           };
         },
       }),
