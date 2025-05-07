@@ -12,6 +12,8 @@
     "node_modules",
   ],
   "include": [
-    "api"
+    "api",
+    "lib",
+    "lambda.ts"
   ]
 }

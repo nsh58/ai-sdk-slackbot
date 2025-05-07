@@ -74,36 +74,52 @@ export async function getThread(
   thread_ts: string,
   botUserId: string,
 ): Promise<CoreMessage[]> {
-  const { messages } = await client.conversations.replies({
-    channel: channel_id,
-    ts: thread_ts,
-    limit: 50,
-  });
+  try {
+    const { messages } = await client.conversations.replies({
+      channel: channel_id,
+      ts: thread_ts,
+      limit: 50,
+    });
 
-  // Ensure we have messages
+    // Ensure we have messages
+    if (!messages) throw new Error("No messages found in thread");
 
-  if (!messages) throw new Error("No messages found in thread");
+    const result = messages
+      .map((message) => {
+        const isBot = !!message.bot_id;
+        if (!message.text) return null;
 
-  const result = messages
-    .map((message) => {
-      const isBot = !!message.bot_id;
-      if (!message.text) return null;
+        // For app mentions, remove the mention prefix
+        // For IM messages, keep the full text
+        let content = message.text;
+        if (!isBot && content.includes(`<@${botUserId}>`)) {
+          content = content.replace(`<@${botUserId}> `, "");
+        }
 
-      // For app mentions, remove the mention prefix
-      // For IM messages, keep the full text
-      let content = message.text;
-      if (!isBot && content.includes(`<@${botUserId}>`)) {
-        content = content.replace(`<@${botUserId}> `, "");
-      }
+        return {
+          role: isBot ? "assistant" : "user",
+          content: content,
+        } as CoreMessage;
+      })
+      .filter((msg): msg is CoreMessage => msg !== null);
 
-      return {
-        role: isBot ? "assistant" : "user",
-        content: content,
-      } as CoreMessage;
-    })
-    .filter((msg): msg is CoreMessage => msg !== null);
-
-  return result;
+    return result;
+  } catch (error: any) {
+    console.error(`スレッド履歴の取得中にエラーが発生しました: ${error.message}`);
+    
+    // missing_scopeエラーの場合、権限不足メッセージを返す
+    if (error.data && error.data.error === 'missing_scope') {
+      console.error(`必要なスコープ: ${error.data.needed}, 提供されたスコープ: ${error.data.provided}`);
+      // 最低限のメッセージ履歴（現在のメッセージのみ）を返す
+      return [{
+        role: "user",
+        content: "すみません、プライベートチャンネルの履歴を読み取る権限がありません。管理者にgroups:historyスコープの追加を依頼してください。"
+      }];
+    }
+    
+    // その他のエラーの場合は再スロー
+    throw error;
+  }
 }
 
 export const getBotId = async () => {
