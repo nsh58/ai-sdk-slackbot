@@ -1,11 +1,11 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import type { SlackEvent } from "@slack/web-api";
+import type { SlackEvent, AppMentionEvent, MessageEvent } from "@slack/web-api";
 import {
   assistantThreadMessage,
   handleNewAssistantMessage,
 } from "./lib/handle-messages";
 import { handleNewAppMention } from "./lib/handle-app-mention";
-import { verifyRequest, getBotId } from "./lib/slack-utils";
+import { verifyRequest, getBotId, checkIfAlreadyResponded } from "./lib/slack-utils";
 
 // タイムアウト監視用の非同期タイマー関数
 const createTimeout = (ms: number): Promise<never> => {
@@ -61,6 +61,14 @@ const isEventProcessed = (eventId: string): boolean => {
   return false;
 };
 
+// メッセージ型イベント (AppMentionEventまたはMessageEvent) かどうかを確認する型ガード
+function isMessageEvent(event: SlackEvent): event is AppMentionEvent | MessageEvent {
+  return (
+    event.type === 'app_mention' || 
+    event.type === 'message'
+  ) && 'channel' in event && 'ts' in event;
+}
+
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   const startTime = Date.now();
   console.log("受信したイベント:", JSON.stringify(event));
@@ -70,8 +78,6 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   if (event.isBase64Encoded) {
     rawBody = Buffer.from(rawBody, 'base64').toString();
   }
-  
-  console.log("リクエストボディ:", rawBody);
   
   try {
     const payload = JSON.parse(rawBody);
@@ -114,13 +120,16 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         
         // Lambdaリクエストオブジェクトの変換
         const lambdaRequest = {
-          headers: new Headers(Object.entries(event.headers || {}).map(([key, value]) => [key, value?.toString() || '']))
+          headers: Object.entries(event.headers || {}).reduce((acc, [key, value]) => {
+            acc[key] = value?.toString() || '';
+            return acc;
+          }, {} as Record<string, string>)
         };
 
         // リクエストの検証
         const verificationResult = await verifyRequest({ 
           requestType, 
-          request: lambdaRequest as any, 
+          request: lambdaRequest, 
           rawBody 
         });
         
@@ -141,54 +150,55 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           console.log(`リトライリクエストを処理します: イベントID=${payload.event_id}`);
         }
 
+        // スレッド履歴をチェックして既に応答済みかを確認する
+        // メッセージ型イベント（app_mentionやmessage）の場合のみ実行
+        if (isMessageEvent(slackEvent)) {
+          try {
+            const isAlreadyProcessed = await checkIfAlreadyResponded(slackEvent);
+            if (isAlreadyProcessed) {
+              console.log(`このイベントは既に処理済みです（スレッド履歴で確認）: ${slackEvent.ts}`);
+              return {
+                statusCode: 200,
+                body: "Event already processed (verified via thread history)"
+              };
+            }
+          } catch (error) {
+            console.error("スレッド履歴確認中にエラー発生:", error);
+            // エラーが発生しても処理は続行（最悪の場合、重複メッセージになる）
+          }
+        }
+
         // タイムアウト時間の延長: Lambdaのタイムアウトが3分(180秒)なので、
         // 安全マージンを取って160秒(リトライなら120秒)に設定
         const timeoutMs = isRetry ? 120000 : 160000; // 120秒または160秒
         console.log(`タイムアウト時間を設定: ${timeoutMs}ms`);
 
-        // スレッド内で応答中であることを伝える
-        try {
-          const { WebClient } = require('@slack/web-api');
-          const client = new WebClient(process.env.SLACK_BOT_TOKEN);
-          
-          // メッセージ本文
-          const messageText = isRetry 
-            ? "再試行中です... (処理は引き続き実行されています)"
-            : "考え中です... (処理が完了するまでお待ちください)";
-
-          if (slackEvent.type === "app_mention") {
-            await client.chat.postMessage({
-              channel: slackEvent.channel,
-              thread_ts: slackEvent.thread_ts || slackEvent.ts,
-              text: messageText
-            });
-          }
-        } catch (postError) {
-          console.error("応答中メッセージの投稿エラー:", postError);
-        }
-
         // イベントタイプに応じた処理
         if (slackEvent.type === "app_mention") {
           console.log("app_mention処理を開始します");
-          await Promise.race([
-            handleNewAppMention(slackEvent, botUserId),
-            createTimeout(timeoutMs)
-          ]).catch(error => {
+          try {
+            await Promise.race([
+              handleNewAppMention(slackEvent, botUserId),
+              createTimeout(timeoutMs)
+            ]);
+            console.log("app_mention処理が完了しました");
+          } catch (error) {
             console.error("処理中にエラーまたはタイムアウトが発生:", error);
-            // エラー発生時も応答を送信
+            // エラー発生時のみ応答を送信
             try {
-              const { WebClient } = require('@slack/web-api');
-              const client = new WebClient(process.env.SLACK_BOT_TOKEN);
-              client.chat.postMessage({
-                channel: slackEvent.channel,
-                thread_ts: slackEvent.thread_ts || slackEvent.ts,
-                text: "申し訳ありません、処理中にエラーが発生しました。しばらく経ってからもう一度お試しください。"
-              }).catch((e: Error) => console.error("エラーメッセージの送信に失敗:", e));
+              if (isMessageEvent(slackEvent)) {
+                const { WebClient } = require('@slack/web-api');
+                const client = new WebClient(process.env.SLACK_BOT_TOKEN);
+                await client.chat.postMessage({
+                  channel: slackEvent.channel,
+                  thread_ts: slackEvent.thread_ts || slackEvent.ts,
+                  text: "申し訳ありません、処理中にエラーが発生しました。しばらく経ってからもう一度お試しください。"
+                });
+              }
             } catch (e) {
               console.error("エラー応答の送信に失敗:", e);
             }
-          });
-          console.log("app_mention処理が完了しました");
+          }
         } else if (slackEvent.type === "assistant_thread_started") {
           await Promise.race([
             assistantThreadMessage(slackEvent),
@@ -196,14 +206,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           ]).catch((error: Error) => console.error("assistant_thread_started処理中にエラー:", error));
         } else if (
           slackEvent.type === "message" &&
-          !slackEvent.subtype &&
-          slackEvent.channel_type === "im" &&
-          !slackEvent.bot_id &&
-          !slackEvent.bot_profile &&
-          slackEvent.bot_id !== botUserId
+          !('subtype' in slackEvent && slackEvent.subtype) &&
+          'channel_type' in slackEvent && slackEvent.channel_type === "im" &&
+          !('bot_id' in slackEvent && slackEvent.bot_id) &&
+          !('bot_profile' in slackEvent && slackEvent.bot_profile) &&
+          !('bot_id' in slackEvent && slackEvent.bot_id === botUserId)
         ) {
           await Promise.race([
-            handleNewAssistantMessage(slackEvent, botUserId),
+            // MessageEvent型として安全に処理するための型ガード
+            handleNewAssistantMessage(slackEvent as any as MessageEvent, botUserId),
             createTimeout(timeoutMs)
           ]).catch((error: Error) => console.error("message処理中にエラー:", error));
         }

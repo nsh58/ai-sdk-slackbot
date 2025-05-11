@@ -19,16 +19,60 @@ interface BacklogWikiContent {
   content: string;
 }
 
+// 状態更新のスロットリング用変数
+const lastUpdateTime: { [key: string]: number } = {};
+const UPDATE_INTERVAL = 2000; // ミリ秒単位（2秒）
+
+// 最適化された状態更新関数
+const throttledUpdate = (
+  updateStatus?: (status: string) => void,
+  operationId: string = 'default'
+) => {
+  return (message: string) => {
+    const now = Date.now();
+    // 前回の更新から一定時間経過していない場合はスキップ
+    if (lastUpdateTime[operationId] && now - lastUpdateTime[operationId] < UPDATE_INTERVAL) {
+      return;
+    }
+    
+    lastUpdateTime[operationId] = now;
+    updateStatus?.(message);
+  };
+};
+
 export const generateResponse = async (
   messages: CoreMessage[],
   updateStatus?: (status: string) => void,
 ) => {
+  // 新しいスロットリングされた更新関数
+  const throttledUpdateStatus = throttledUpdate(updateStatus);
+  
+  // 処理開始メッセージ - 一回だけ送信
+  throttledUpdateStatus("考え中...");
+
   const { text } = await generateText({
     model: anthropic("claude-3-5-haiku-20241022"),
-    system: `You are a Slack bot assistant Keep your responses concise and to the point.
-    - Do not tag users.
-    - Current date is: ${new Date().toISOString().split("T")[0]}
-    - Make sure to ALWAYS include sources in your final response if you use web search. Put sources inline if possible.`,
+    system: `あなたは日本語でのSlack botアシスタントです。回答は簡潔かつ要点をついたものにしてください。
+    
+    - 現在の日付: ${new Date().toISOString().split("T")[0]}
+    - ユーザーにメンションを付けないでください
+    
+    # Backlog Wiki検索と情報取得のプロセス
+    ユーザーからの質問に対して、以下の手順で情報を収集して回答してください：
+    
+    1. まず、「searchBacklogWiki」ツールを使って関連するWikiページを検索してください
+    2. 検索結果があれば、最も関連性の高いWikiページを特定し、「getBacklogWikiContent」ツールでその内容を取得してください
+    3. 取得したWiki内容に基づいて質問に回答してください
+    4. 情報源として、参照したWikiページのタイトルを回答に含めてください
+    
+    情報が見つからない場合のみ「関連する情報が見つかりませんでした」と回答してください。
+    
+    # キーワード抽出のポイント
+    - 「部費」→「部費」「部活動」「費用」などのキーワードで検索
+    - 「イベント」「日程」→「イベント」「スケジュール」「カレンダー」などで検索
+    - 「ルール」「規則」→「ルール」「規約」「ガイドライン」などで検索
+    
+    検索結果は必ず確認し、適切なWikiページの内容を取得してから回答してください。`,
     messages,
     maxSteps: 10,
     tools: {
@@ -38,7 +82,8 @@ export const generateResponse = async (
           wikiId: z.string().describe("取得するWikiページのID")
         }),
         execute: async ({ wikiId }) => {
-          updateStatus?.(`Backlog WikiID: ${wikiId} の内容を取得中...`);
+          // スロットリングされた更新関数を使用
+          throttledUpdateStatus(`Backlog WikiID: ${wikiId} の内容を取得中...`);
           
           const wiki = await fetchBacklogWikiContent(wikiId);
           return {
@@ -57,7 +102,8 @@ export const generateResponse = async (
           maxResults: z.number().default(10),
         }),
         execute: async ({ keyword, projectId, maxResults }) => {
-          updateStatus?.(`キーワード "${keyword}" でBacklog Wikiを検索中...`);
+          // スロットリングされた更新関数を使用
+          throttledUpdateStatus(`キーワード "${keyword}" でBacklog Wikiを検索中...`);
           
           const results = await fetchSearchWiki(keyword, projectId, maxResults);
           return results.map((wiki: BacklogWiki) => ({

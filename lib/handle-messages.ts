@@ -1,6 +1,7 @@
 import type {
   AssistantThreadStartedEvent,
   GenericMessageEvent,
+  MessageEvent, // MessageEvent型をインポート
 } from "@slack/web-api";
 import { client, getThread, updateStatusUtil } from "./slack-utils";
 import { generateResponse } from "./generate-response";
@@ -35,18 +36,20 @@ export async function assistantThreadMessage(
 }
 
 export async function handleNewAssistantMessage(
-  event: GenericMessageEvent,
+  event: MessageEvent, // GenericMessageEventからより広い範囲のMessageEventに変更
   botUserId: string,
 ) {
+  // botメッセージや特定の条件のメッセージは処理しない
   if (
-    event.bot_id ||
-    event.bot_id === botUserId ||
-    event.bot_profile ||
-    !event.thread_ts
+    ("bot_id" in event && event.bot_id) ||
+    ("bot_id" in event && event.bot_id === botUserId) ||
+    ("bot_profile" in event && event.bot_profile) ||
+    !("thread_ts" in event && event.thread_ts)
   )
     return;
 
-  const { thread_ts, channel } = event;
+  const thread_ts = event.thread_ts;
+  const channel = event.channel;
   const updateStatus = updateStatusUtil(channel, thread_ts);
   await updateStatus("is thinking...");
 
